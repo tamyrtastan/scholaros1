@@ -164,11 +164,13 @@ async function analyzeOne(
   const hash = sha(PROMPT_VERSION, ai.model, comment.original_comment, ctx.excerpt, guidelines ?? "", authorInput);
   const existing = bundle.analyses.find((a) => a.reviewer_comment_id === comment.id);
 
+  // The offline demo analyser costs nothing, so it never counts against the user's allowance or usage figures.
+  const billable = ai.name !== "mock";
   if (existing && existing.input_hash === hash && !force) {
-    await recordUsage(db, { userId, projectId: comment.project_id, kind: "ai_cache_hit" });
+    if (billable) await recordUsage(db, { userId, projectId: comment.project_id, kind: "ai_cache_hit" });
     return "cached";
   }
-  if (ai.name !== "mock") await assertWithinTokenBudget(db, userId);
+  if (billable) await assertWithinTokenBudget(db, userId);
 
   const res = await completeStructured(
     ai, analysisOutputSchema,
@@ -176,10 +178,11 @@ async function analyzeOne(
     config.ai.maxRetries,
   );
   await recordUsage(db, {
-    userId, projectId: comment.project_id, kind: "ai_analysis",
-    inputTokens: res.inputTokens, outputTokens: res.outputTokens, meta: { provider: ai.name, model: ai.model, attempts: res.attempts },
+    userId, projectId: comment.project_id, kind: billable ? "ai_analysis" : "demo_analysis",
+    inputTokens: billable ? res.inputTokens : 0, outputTokens: billable ? res.outputTokens : 0,
+    meta: { provider: ai.name, model: ai.model, attempts: res.attempts },
   });
-  const out = enforceIntegrity({ ...res.data, comment_id: comment.id }, manuscript.extracted_text);
+  const out = enforceIntegrity({ ...res.data, comment_id: comment.id }, { manuscript: manuscript.extracted_text, authorInput, comment: comment.original_comment, guidelines });
 
   const row = {
     reviewer_comment_id: comment.id, project_id: comment.project_id,
@@ -335,15 +338,25 @@ export async function updateResponseEntry(
 
 // ---------- deletion ----------
 
-/** Deletes the project, all derived rows and all stored files. */
-export async function deleteProject(db: Db, storage: Storage, userId: string, projectId: string) {
+/** Deletes a project's database rows (children first). Used directly to roll back a failed creation. */
+export async function deleteProjectRows(db: Db, userId: string, projectId: string) {
   const project = await getOwnedProject(db, userId, projectId);
   if (project.user_id !== userId) throw new ForbiddenError();
-  await storage.removePrefix(`${userId}/${projectId}`);
   for (const t of ["response_entries", "revision_items", "author_inputs", "comment_analyses", "reviewer_comments", "reviewers", "documents"] as const) {
     await db.remove(t, { project_id: projectId });
   }
   // keep usage events (cost accounting / monthly budget) but detach them from the deleted project
   for (const e of await db.find("usage_events", { project_id: projectId })) await db.update("usage_events", e.id, { project_id: null });
   await db.remove("projects", { id: projectId });
+}
+
+/**
+ * Deletes the project, all derived rows and all stored files.
+ * Files go first: if storage is unavailable we fail with nothing deleted, rather than silently leaving
+ * confidential files behind an already-deleted project.
+ */
+export async function deleteProject(db: Db, storage: Storage, userId: string, projectId: string) {
+  await getOwnedProject(db, userId, projectId);
+  await storage.removePrefix(`${userId}/${projectId}`);
+  await deleteProjectRows(db, userId, projectId);
 }

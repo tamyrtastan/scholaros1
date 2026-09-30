@@ -23,6 +23,7 @@ export function AuthForm({ mode, action, error }: { mode: "signin" | "signup"; a
           <div>
             <Label htmlFor="password" hint={up ? "(min. 8 characters)" : undefined}>Password</Label>
             <Input id="password" name="password" type="password" required minLength={up ? 8 : 1} autoComplete={up ? "new-password" : "current-password"} />
+            {!up && <p className="mt-1 text-xs"><Link href="/forgot-password" className="text-brand underline">Forgot your password?</Link></p>}
           </div>
           <Button type="submit" className="w-full">{up ? "Create account" : "Sign in"}</Button>
         </form>

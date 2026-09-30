@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeProject, buildResponseEntry, createProject, deleteProject, generateResponses, getOwnedProject, getProjectBundle, setCommentStatus, setRevisionDecision, submitAuthorInput, updateResponseEntry } from "@/modules/paperfix/service";
+import { analyzeProject, buildResponseEntry, createProject, deleteProject, deleteProjectRows, generateResponses, getOwnedProject, getProjectBundle, setCommentStatus, setRevisionDecision, submitAuthorInput, updateResponseEntry } from "@/modules/paperfix/service";
 import { buildJsonExport, buildLetterModel, buildReportDocx, buildResponseDocx } from "@/modules/paperfix/export";
 import { extractText } from "@/core/documents/extract";
 import { getSubscription, setPlan, tokensUsedThisMonth } from "@/core/billing/entitlements";
@@ -8,8 +8,9 @@ import { createHmac } from "node:crypto";
 import type { Storage } from "@/core/storage";
 import { demoSetup, setup } from "./helpers";
 import { createDemoProject } from "@/modules/paperfix/demo";
+import { getUsageSummary } from "@/core/billing/entitlements";
 
-const nullStorage: Storage & { removed: string[] } = { removed: [], async put() {}, async get() { return Buffer.alloc(0); }, async removePrefix(p) { this.removed.push(p); } };
+const nullStorage: Storage & { removed: string[] } = { removed: [], async put() {}, async get() { return Buffer.alloc(0); }, async ping() {}, async removePrefix(p) { this.removed.push(p); } };
 
 describe("demo project end-to-end (mock AI)", () => {
   it("analyses every comment and flags missing allocation procedure", async () => {
@@ -17,7 +18,7 @@ describe("demo project end-to-end (mock AI)", () => {
     const res = await analyzeProject(db, ai, alice.id, project.id);
     expect(res).toEqual({ analyzed: 6, cached: 0, failed: 0 });
     const b = await getProjectBundle(db, alice.id, project.id);
-    const c1 = b.comments.find((c) => c.original_comment.startsWith("The sampling procedure"))!;
+    const c1 = b.comments.find((c: { original_comment: string }) => c.original_comment.startsWith("The sampling procedure"))!;
     const a1 = b.analyses.find((a) => a.reviewer_comment_id === c1.id)!;
     expect(a1.author_input_required).toBe(true);
     expect(a1.suggested_revision).toContain("AUTHOR INPUT REQUIRED");
@@ -28,12 +29,13 @@ describe("demo project end-to-end (mock AI)", () => {
   });
 
   it("reuses cached analyses: second run makes no AI calls", async () => {
-    const { db, ai, alice, project } = await demoSetup();
+    const { db, ai: mock, alice, project } = await demoSetup();
+    const ai = { ...mock, name: "anthropic" }; // a billable provider, so usage is recorded
     await analyzeProject(db, ai, alice.id, project.id);
-    const before = (await db.find("usage_events", { user_id: alice.id })).filter((e) => e.kind === "ai_analysis").length;
+    const before = (await db.find("usage_events", { user_id: alice.id })).filter((e: { kind: string }) => e.kind === "ai_analysis").length;
     const res = await analyzeProject(db, ai, alice.id, project.id);
     expect(res).toEqual({ analyzed: 0, cached: 6, failed: 0 });
-    expect((await db.find("usage_events", { user_id: alice.id })).filter((e) => e.kind === "ai_analysis").length).toBe(before);
+    expect((await db.find("usage_events", { user_id: alice.id })).filter((e: { kind: string }) => e.kind === "ai_analysis").length).toBe(before);
     expect(await tokensUsedThisMonth(db, alice.id)).toBeGreaterThan(0);
   });
 
@@ -41,7 +43,7 @@ describe("demo project end-to-end (mock AI)", () => {
     const { db, ai, alice, project } = await demoSetup();
     await analyzeProject(db, ai, alice.id, project.id);
     const b = await getProjectBundle(db, alice.id, project.id);
-    const c1 = b.comments.find((c) => c.original_comment.startsWith("The sampling procedure"))!;
+    const c1 = b.comments.find((c: { original_comment: string }) => c.original_comment.startsWith("The sampling procedure"))!;
     const res = await submitAuthorInput(db, ai, alice.id, project.id, c1.id, "Students were allocated by a sealed-envelope draw.");
     expect(res.analyzed).toBe(1);
     const after = await getProjectBundle(db, alice.id, project.id);
@@ -156,7 +158,8 @@ describe("project creation, limits and deletion", () => {
     await expect(createProject(db, alice.id, { title: "P2", ...files("1. a point") })).resolves.toBeTruthy();
   });
   it("deletes project, derived rows and files but keeps usage accounting", async () => {
-    const { db, ai, alice, project } = await demoSetup();
+    const { db, ai: mock, alice, project } = await demoSetup();
+    const ai = { ...mock, name: "anthropic" };
     await analyzeProject(db, ai, alice.id, project.id);
     await deleteProject(db, nullStorage, alice.id, project.id);
     for (const t of ["projects", "documents", "reviewers", "reviewer_comments", "comment_analyses", "revision_items"] as const) {
@@ -185,5 +188,62 @@ describe("billing", () => {
     await applyPaddleEvent(db, { ...evt, event_type: "subscription.canceled" });
     expect((await getSubscription(db, alice.id)).plan).toBe("free");
     expect(await applyPaddleEvent(db, { event_type: "subscription.created", data: { custom_data: { user_id: alice.id, plan: "admin" } } })).toBe(false);
+  });
+});
+
+describe("usage tracking per user and per plan", () => {
+  it("records the plan with each event and summarises the month by plan", async () => {
+    const { db, ai: mock, alice, bob, project } = await demoSetup();
+    const ai = { ...mock, name: "anthropic" };
+    await analyzeProject(db, ai, alice.id, project.id);
+    await setPlan(db, alice.id, "pro");
+    await analyzeProject(db, ai, alice.id, project.id, { force: true });
+    const s = await getUsageSummary(db, alice.id);
+    expect(s.plan).toBe("pro");
+    expect(s.analyses).toBe(12);
+    expect(s.byPlan.map((b) => b.plan).sort()).toEqual(["free", "pro"]);
+    expect(s.byPlan.find((b) => b.plan === "free")!.analyses).toBe(6);
+    expect(s.tokens.used).toBe(s.tokens.input + s.tokens.output);
+    expect(s.projects).toEqual({ used: 0, limit: 10 }); // demo projects do not count
+    // usage is per user: bob has none
+    expect((await getUsageSummary(db, bob.id)).analyses).toBe(0);
+  });
+  it("counts cache hits separately and enforces the monthly token budget for real providers only", async () => {
+    const { db, ai: mock, alice, project } = await demoSetup();
+    const ai = { ...mock, name: "anthropic" };
+    await analyzeProject(db, ai, alice.id, project.id);
+    await analyzeProject(db, ai, alice.id, project.id);
+    expect((await getUsageSummary(db, alice.id)).cacheHits).toBe(6);
+    // exhaust the free budget artificially, then a NON-mock provider must be refused while the mock (demo) still works
+    await db.insert("usage_events", { user_id: alice.id, project_id: null, plan: "free", kind: "ai_analysis", input_tokens: 1_000_000, output_tokens: 0, meta: {} });
+    await expect(analyzeProject(db, ai, alice.id, project.id, { force: true })).rejects.toThrow(/allowance/);
+    await expect(analyzeProject(db, mock, alice.id, project.id, { force: true })).resolves.toBeTruthy(); // demo still works
+  });
+});
+
+describe("demo analysis is free", () => {
+  it("records zero tokens and is invisible in usage figures and budget", async () => {
+    const { db, ai, alice, project } = await demoSetup();
+    await analyzeProject(db, ai, alice.id, project.id);
+    await analyzeProject(db, ai, alice.id, project.id); // cached
+    const events = await db.find("usage_events", { user_id: alice.id });
+    expect(events.every((e) => e.kind === "demo_analysis" && e.input_tokens === 0 && e.output_tokens === 0)).toBe(true);
+    const s = await getUsageSummary(db, alice.id);
+    expect(s).toMatchObject({ analyses: 0, cacheHits: 0 });
+    expect(s.tokens.used).toBe(0);
+  });
+});
+
+describe("rollback and deletion order", () => {
+  it("deleteProjectRows removes rows without touching storage (used to roll back failed uploads)", async () => {
+    const { db, alice, project } = await demoSetup();
+    await deleteProjectRows(db, alice.id, project.id);
+    expect(await db.get("projects", project.id)).toBeNull();
+  });
+  it("deleteProject fails without deleting anything when storage is down", async () => {
+    const { db, alice, project } = await demoSetup();
+    const down = { ...nullStorage, removePrefix: async () => { throw new Error("storage down"); } };
+    await expect(deleteProject(db, down, alice.id, project.id)).rejects.toThrow(/storage down/);
+    expect(await db.get("projects", project.id)).not.toBeNull();
   });
 });

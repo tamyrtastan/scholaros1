@@ -1,45 +1,25 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Db } from "./store";
-import type { TableName, Tables } from "./types";
+import type { Db, InsertRow } from "@/core/db/store";
+import type { TableName, Tables } from "@/core/db/types";
 
 type Data = Record<string, Record<string, unknown>[]>;
 
-/** JSON-file backed store for local development and tests. Pass `null` for a purely in-memory store. */
-export class LocalDb implements Db {
+/** In-memory Db used by unit tests (production uses PostgresDb). */
+export class MemoryDb implements Db {
   private data: Data | null = null;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(private file: string | null) {}
 
   private async load(): Promise<Data> {
-    if (this.data) return this.data;
-    if (this.file) {
-      try {
-        this.data = JSON.parse(await fs.readFile(this.file, "utf8")) as Data;
-      } catch {
-        this.data = {};
-      }
-    } else this.data = {};
-    return this.data;
-  }
-
-  private async persist() {
-    if (!this.file || !this.data) return;
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(tmp, JSON.stringify(this.data));
-    await fs.rename(tmp, this.file);
+    return (this.data ??= {});
   }
 
   /** Serialise all operations so concurrent server actions cannot corrupt the file. */
-  private run<R>(fn: (d: Data) => R, write: boolean): Promise<R> {
+  private run<R>(fn: (d: Data) => R, ...rest: [boolean?]): Promise<R> {
+    void rest;
     const next = this.queue.then(async () => {
       const d = await this.load();
-      const r = fn(d);
-      if (write) await this.persist();
-      return r;
+      return fn(d);
     });
     this.queue = next.catch(() => undefined);
     return next;
@@ -49,7 +29,7 @@ export class LocalDb implements Db {
     return !where || Object.entries(where).every(([k, v]) => row[k] === v);
   }
 
-  insert<T extends TableName>(table: T, row: Parameters<Db["insert"]>[1]) {
+  insert<T extends TableName>(table: T, row: InsertRow<T>) {
     return this.run((d) => {
       const full = { id: randomUUID(), created_at: new Date().toISOString(), ...row } as unknown as Tables[T];
       (d[table] ??= []).push(structuredClone(full) as unknown as Record<string, unknown>);

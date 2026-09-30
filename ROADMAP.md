@@ -1,10 +1,10 @@
 # ROADMAP
 
-## Next task (required before real launch)
-1. Supabase Auth adapter replacing local cookie auth; verify `SupabaseDb` + Supabase Storage against a live project (code exists, unexercised); run RLS tests.
-2. Verify the Anthropic path with a real key (prompt quality, cost per comment, output validation rate).
-3. Verify Paddle checkout + webhooks in sandbox; add Paddle.js overlay if preferred over hosted checkout.
-4. Shared rate limiter (Upstash), email provider (Resend), real analytics sink, OCR for scanned PDFs, legal pages.
+## Next task (before real launch)
+1. Follow README "Production setup" on a real Supabase project; run `npm run test:integration` against it (`INTEGRATION_*` env) and a smoke pass of the E2E auth flows with a real mailbox.
+2. `npm run ai:smoke` with a real key; measure cost per comment and output-validation rate; tune `AI_EFFORT`/`AI_MODEL`.
+3. Verify the `fallbacks` refusal-fallback beta parameter against the live API (disable with `AI_REFUSAL_FALLBACK=false` if rejected).
+4. Paddle sandbox: checkout + webhook round trip. Shared rate limiter (Upstash), CSP, CAPTCHA, account deletion, CI workflow (lint/typecheck/unit/build), real analytics sink, OCR for scanned PDFs, legal pages.
 
 ## PaperFix next
 Page/line locations from DOCX, tracked-changes export, per-section re-analysis UI, reviewer-comment file import UX, response-letter templates per journal, i18n.

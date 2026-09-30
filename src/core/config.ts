@@ -11,20 +11,12 @@ export const config = {
   get appUrl() {
     return process.env.APP_URL ?? "http://localhost:3000";
   },
-  get sessionSecret() {
-    const s = process.env.SESSION_SECRET;
-    if (s) return s;
-    if (this.isProd && process.env.NEXT_PHASE !== "phase-production-build") {
-      throw new Error("SESSION_SECRET must be set in production");
-    }
-    return "dev-only-insecure-secret";
-  },
   providers: {
     get db() {
-      return process.env.DB_PROVIDER ?? "local";
+      return process.env.DB_PROVIDER ?? "postgres";
     },
     get storage() {
-      return process.env.STORAGE_PROVIDER ?? "local";
+      return process.env.STORAGE_PROVIDER ?? (process.env.NODE_ENV === "production" ? "s3" : "local");
     },
     get ai() {
       return process.env.AI_PROVIDER ?? "mock";
@@ -51,6 +43,10 @@ export const config = {
     },
   },
   limits: {
+    /** Per-IP auth attempts per minute (sign-up/sign-in/reset). Only raise in test environments. */
+    get authPerMinute() {
+      return num(process.env.AUTH_RATE_LIMIT_PER_MINUTE, 10);
+    },
     maxUploadBytes: 10 * 1024 * 1024,
     maxCommentChars: 6000,
     maxPastedChars: 200_000,

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { analysisOutputSchema, type AnalysisOutput } from "@/modules/paperfix/schemas";
 import { completeStructured, extractJson } from "@/core/ai/structured";
 import type { AiProvider } from "@/core/ai/provider";
-import { enforceIntegrity } from "@/modules/paperfix/guardrails";
+import { enforceIntegrity, findUnsupported } from "@/modules/paperfix/guardrails";
 import { mockAnalyze } from "@/modules/paperfix/mock-ai";
 import { selectContext } from "@/modules/paperfix/context";
 import { detectSections } from "@/core/documents/sections";
@@ -77,6 +77,33 @@ describe("integrity guardrails", () => {
   it("adds a generic missing item when the model flags input required without listing any", () => {
     const out = enforceIntegrity({ ...valid, author_input_required: true }, "text");
     expect(out.missing_information).toHaveLength(1);
+  });
+});
+
+describe("unsupported specifics (fabrication detector)", () => {
+  const src = { manuscript: DEMO_MANUSCRIPT, authorInput: "We used a sealed-envelope draw with 12 envelopes.", comment: "Please report effect sizes." };
+  it("flags numbers, DOIs and citations that appear in no source; allows ones that do", () => {
+    const f = findUnsupported("Mean PSS fell from 24.1 to 19.8 (n = 60). Effect size d = 0.85, p = 0.003; see Smith et al. (2019) doi 10.1234/abcd.5678. We used 12 envelopes; thirty per group.", src);
+    expect(f.numbers).toEqual(["0.85"]);
+    expect(f.dois).toEqual(["10.1234/abcd.5678"]);
+    expect(f.citations.join(" ")).toMatch(/Smith/);
+  });
+  it("replaces unsupported specifics with verify-placeholders and forces author input", () => {
+    const out = enforceIntegrity({ ...valid, suggested_revision: "The effect size was d = 0.85 (95% CI 0.4 to 1.3).", suggested_response_to_reviewer: "Added d = 0.85." }, src);
+    expect(out.suggested_revision).toContain('[AUTHOR INPUT REQUIRED: verify "0.85"]');
+    expect(out.suggested_revision).not.toMatch(/d = 0\.85(?!")/);
+    expect(out.author_input_required).toBe(true);
+    expect(out.missing_information.join(" ")).toMatch(/not in your manuscript/);
+  });
+  it("does not flag text made only of supported facts (incl. author-provided ones)", () => {
+    const out = enforceIntegrity({ ...valid, suggested_revision: "Thirty students used a sealed-envelope draw with 12 envelopes; scores changed from 24.1 to 19.8.", suggested_response_to_reviewer: "Done." }, src);
+    expect(out.author_input_required).toBe(false);
+    expect(out.suggested_revision).not.toContain("verify");
+  });
+  it("accepts evidence quoted from the author's own input", () => {
+    const out = enforceIntegrity({ ...valid, evidence_from_manuscript: ["sealed-envelope draw with 12 envelopes"] }, src);
+    expect(out.evidence_from_manuscript).toHaveLength(1);
+    expect(out.author_input_required).toBe(false);
   });
 });
 

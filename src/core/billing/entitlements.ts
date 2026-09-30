@@ -49,12 +49,51 @@ export async function assertWithinTokenBudget(db: Db, userId: string) {
   }
 }
 
+/** Records one usage event together with the plan the user is on right now. */
 export async function recordUsage(
   db: Db,
   e: { userId: string; projectId?: string; kind: string; inputTokens?: number; outputTokens?: number; meta?: Record<string, unknown> },
 ) {
+  const plan = (await getPlan(db, e.userId)).id;
   await db.insert("usage_events", {
-    user_id: e.userId, project_id: e.projectId ?? null, kind: e.kind,
+    user_id: e.userId, project_id: e.projectId ?? null, plan, kind: e.kind,
     input_tokens: e.inputTokens ?? 0, output_tokens: e.outputTokens ?? 0, meta: e.meta ?? {},
   });
+}
+
+export interface UsageSummary {
+  plan: PlanId;
+  month: string;
+  projects: { used: number; limit: number };
+  tokens: { used: number; budget: number; input: number; output: number };
+  analyses: number;
+  cacheHits: number;
+  byPlan: { plan: PlanId; analyses: number; tokens: number }[];
+}
+
+/** Per-user usage for the current calendar month, in total and split by the plan in force when it occurred. */
+export async function getUsageSummary(db: Db, userId: string, now = new Date()): Promise<UsageSummary> {
+  const plan = await getPlan(db, userId);
+  const from = monthStart(now);
+  const events = (await db.find("usage_events", { user_id: userId })).filter((e) => e.created_at >= from);
+  const byPlan = new Map<PlanId, { plan: PlanId; analyses: number; tokens: number }>();
+  let input = 0;
+  let output = 0;
+  for (const e of events) {
+    input += e.input_tokens;
+    output += e.output_tokens;
+    const row = byPlan.get(e.plan) ?? { plan: e.plan, analyses: 0, tokens: 0 };
+    if (e.kind === "ai_analysis") row.analyses++;
+    row.tokens += e.input_tokens + e.output_tokens;
+    byPlan.set(e.plan, row);
+  }
+  return {
+    plan: plan.id,
+    month: from.slice(0, 7),
+    projects: { used: (await db.find("projects", { user_id: userId })).filter((p) => !p.is_demo).length, limit: plan.limits.maxProjects },
+    tokens: { used: input + output, budget: plan.limits.monthlyTokenBudget, input, output },
+    analyses: events.filter((e) => e.kind === "ai_analysis").length,
+    cacheHits: events.filter((e) => e.kind === "ai_cache_hit").length,
+    byPlan: [...byPlan.values()],
+  };
 }

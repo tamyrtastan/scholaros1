@@ -9,12 +9,8 @@ interface Base {
 }
 
 // ---- shared core ----
-export interface UserRow extends Base {
-  email: string;
-  password_hash: string; // local auth only; unused with Supabase Auth
-}
 export interface ProfileRow extends Base {
-  // id == users.id
+  // id == auth.users.id (Supabase Auth)
   display_name: string;
   institution: string | null;
   research_interests: string[]; // reserved for GrantPilot matching
@@ -34,6 +30,7 @@ export interface SubscriptionRow extends Base {
 export interface UsageEventRow extends Base {
   user_id: Id;
   project_id: Id | null;
+  plan: PlanId; // plan in force when the event happened
   kind: string; // e.g. ai_analysis, ai_cache_hit
   input_tokens: number;
   output_tokens: number;
@@ -113,7 +110,6 @@ export interface ResponseEntryRow extends Base {
 }
 
 export interface Tables {
-  users: UserRow;
   profiles: ProfileRow;
   subscriptions: SubscriptionRow;
   usage_events: UsageEventRow;

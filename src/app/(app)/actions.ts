@@ -86,7 +86,9 @@ export async function createProjectAction(form: FormData) {
         if (u?.buffer && u.input.storagePath) await storage.put(u.input.storagePath, u.buffer, u.contentType);
       }
     } catch (e) {
-      await pf.deleteProject(db, getStorage(), user.id, project.id);
+      // Roll back: the DB rows must go even if storage is what failed. File cleanup is best effort.
+      await pf.deleteProjectRows(db, user.id, project.id);
+      await getStorage().removePrefix(`${user.id}/${project.id}`).catch(() => console.error("[storage] cleanup after failed upload did not complete"));
       throw e;
     }
     track("manuscript_uploaded", user.id, { via: manuscript.buffer ? "file" : "paste" });
